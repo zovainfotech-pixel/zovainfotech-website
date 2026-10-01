@@ -1,0 +1,392 @@
+@import 'tailwindcss';
+
+/* ── Brand design tokens ──────────────────────────────────────────────────
+   Derived from the Zova Infotech logo (scripts/brand/zova-logo-source.png):
+     wordmark navy  #062F65   ·  Z deep blue  #0D509F  ·  Z mid blue #0A7BC1
+     Z / ring aqua  #02C6DC   ·  INFOTECH azure ~#10A5E6 ·  tagline charcoal #3C3C3C
+   Semantic variables live on :root; Tailwind colours below reference them. */
+:root {
+  /* Brand accents — sampled from the logo */
+  --brand-primary: #0c5dae; /* buttons, links — Z blue, AA on white */
+  --brand-primary-deep: #0d509f;
+  --brand-secondary: #0a7bc1; /* Z mid-tone */
+  --brand-azure: #10a5e6; /* INFOTECH */
+  --brand-accent: #00c9e8; /* cyan accent */
+  --brand-dark: #123b73; /* primary navy */
+  --brand-bright: #0878e8; /* bright blue (gradients, icons — not small body text) */
+  --brand-light: #eef6fc;
+
+  /* Grounds — 70% light corporate / 30% dark enterprise */
+  --background-primary: #f7f9fc;
+  --background-card: #ffffff;
+  --background-dark: #0b1220;
+  --background-hero: #07111f;
+  --brand-ink: var(--background-dark);
+  --surface: var(--background-primary);
+  --surface-glass: rgb(255 255 255 / 0.06);
+  --surface-glass-light: rgb(255 255 255 / 0.72);
+
+  /* Text */
+  --text-primary: #252d3a;
+  --text-secondary: #5b6472;
+  --text-muted: #7a8494;
+  --text-on-dark: #aab4c3;
+
+  --border: #e5eaf1;
+  --shadow-card: 0 8px 30px rgb(11 18 32 / 0.06);
+  --gradient-primary: linear-gradient(120deg, #123b73 0%, #0878e8 55%, #00c9e8 100%);
+  --gradient-dark: linear-gradient(135deg, #07111f 0%, #0b1220 55%, #0d3a78 100%);
+}
+
+@theme {
+  --breakpoint-nav: 80rem;
+  --font-sans: 'Plus Jakarta Sans Variable', 'Plus Jakarta Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-display: 'Plus Jakarta Sans Variable', 'Plus Jakarta Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'Plus Jakarta Sans Variable', 'Plus Jakarta Sans', ui-sans-serif, system-ui, sans-serif; /* one family site-wide; labels use uppercase + tracking */
+
+  --color-navy-950: var(--brand-ink);
+  --color-navy-900: #111b2e;
+  --color-navy-800: #182640;
+  --color-navy-700: #22345a;
+  --color-hero: var(--background-hero);
+  --color-brand-50: var(--brand-light);
+  --color-brand-100: #d8ebf8;
+  --color-brand-200: #b3d7f1;
+  --color-brand-300: #7fbde8;
+  --color-brand-400: #3e9bdb;
+  --color-brand-500: var(--brand-secondary);
+  --color-brand-600: var(--brand-primary);
+  --color-brand-700: var(--brand-primary-deep);
+  --color-brand-800: var(--brand-dark);
+  --color-cyan-accent: var(--brand-accent);
+  /* Legacy accent names, re-pointed to logo hues so no off-brand colour remains. */
+  --color-violet-accent: var(--brand-azure);
+  --color-purple-accent: var(--brand-secondary);
+  --color-teal-accent: #06b6cc;
+  --color-lime-accent: #7fe3f0;
+  --color-orange-accent: #19c3e6;
+  --color-crimson-accent: var(--brand-primary-deep);
+  --color-crimson-deep: var(--brand-dark);
+  --color-surface: var(--surface);
+  --color-lavender: #eaf3fb;
+  --color-ink: var(--text-primary);
+  --color-muted: var(--text-secondary);
+  --color-subtle: var(--text-muted);
+  --color-line: var(--border);
+  --color-on-dark: var(--text-on-dark);
+
+  --radius-card: 1.25rem;
+  --shadow-card: 0 8px 30px rgb(11 18 32 / 0.06);
+  --shadow-card-hover: 0 14px 40px -12px rgb(11 18 32 / 0.12), 0 0 0 1px rgb(12 93 174 / 0.14);
+  --shadow-float: 0 30px 70px -28px rgb(0 0 0 / 0.65);
+  --shadow-glow: 0 0 0 1px rgb(2 198 220 / 0.25), 0 20px 60px -20px rgb(10 123 193 / 0.55);
+
+  --animate-shimmer: shimmer 1.6s linear infinite;
+  --animate-orb: orb 18s ease-in-out infinite alternate;
+  --animate-grad: grad 10s ease infinite;
+  --animate-float: float 7s ease-in-out infinite;
+  --animate-dash: dash 6s linear infinite;
+  --animate-spin-slow: spin 14s linear infinite;
+  --animate-drift: drift 16s linear infinite;
+  --animate-sweep: sweep 5.5s ease-in-out infinite;
+  --animate-eq: eq 1.1s ease-in-out infinite;
+  --animate-track: track 9s ease-in-out infinite;
+  --animate-slides: slides 9s ease-in-out infinite;
+  --animate-flow-x: flow-x 3.2s linear infinite;
+  --animate-flow-y: flow-y 3.2s linear infinite;
+  --animate-ring: ring 2.6s ease-out infinite;
+  --animate-marquee: marquee 40s linear infinite;
+
+  @keyframes marquee {
+    to {
+      transform: translateX(-50%);
+    }
+  }
+
+  @keyframes sweep {
+    0%,
+    35% {
+      transform: translateX(-120%) skewX(-18deg);
+    }
+    75%,
+    100% {
+      transform: translateX(260%) skewX(-18deg);
+    }
+  }
+  @keyframes eq {
+    0%,
+    100% {
+      transform: scaleY(0.25);
+    }
+    50% {
+      transform: scaleY(1);
+    }
+  }
+  @keyframes track {
+    0%,
+    22% {
+      left: 3%;
+      top: 5%;
+    }
+    30%,
+    52% {
+      left: 51%;
+      top: 5%;
+    }
+    60%,
+    82% {
+      left: 27%;
+      top: 53%;
+    }
+    90%,
+    100% {
+      left: 3%;
+      top: 5%;
+    }
+  }
+  @keyframes slides {
+    0%,
+    28% {
+      transform: translateX(0);
+    }
+    33%,
+    61% {
+      transform: translateX(-33.333%);
+    }
+    66%,
+    95% {
+      transform: translateX(-66.666%);
+    }
+    100% {
+      transform: translateX(0);
+    }
+  }
+  @keyframes flow-x {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: translateX(400%);
+    }
+  }
+  @keyframes flow-y {
+    from {
+      transform: translateY(-100%);
+    }
+    to {
+      transform: translateY(400%);
+    }
+  }
+  @keyframes ring {
+    0% {
+      transform: scale(0.8);
+      opacity: 0.7;
+    }
+    100% {
+      transform: scale(1.8);
+      opacity: 0;
+    }
+  }
+  @keyframes shimmer {
+    to {
+      background-position: -200% 0;
+    }
+  }
+  @keyframes orb {
+    0% {
+      transform: translate3d(0, 0, 0) scale(1);
+    }
+    100% {
+      transform: translate3d(6%, -8%, 0) scale(1.15);
+    }
+  }
+  @keyframes grad {
+    0%,
+    100% {
+      background-position: 0% 50%;
+    }
+    50% {
+      background-position: 100% 50%;
+    }
+  }
+  @keyframes float {
+    0%,
+    100% {
+      transform: translateY(0);
+    }
+    50% {
+      transform: translateY(-10px);
+    }
+  }
+  @keyframes dash {
+    to {
+      stroke-dashoffset: -200;
+    }
+  }
+  @keyframes drift {
+    0% {
+      transform: translateY(0);
+      opacity: 0;
+    }
+    15%,
+    80% {
+      opacity: 0.9;
+    }
+    100% {
+      transform: translateY(-160px);
+      opacity: 0;
+    }
+  }
+}
+
+/* ── Base ─────────────────────────────────────────────────────────────── */
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    scroll-behavior: smooth;
+  }
+  body {
+    @apply bg-[var(--background-primary)] font-sans text-ink antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  h1,
+  h2,
+  h3,
+  h4 {
+    @apply tracking-tight text-balance;
+  }
+  h1,
+  h2 {
+    font-family: var(--font-display);
+  }
+  p {
+    text-wrap: pretty;
+  }
+  :focus-visible {
+    outline: 3px solid var(--color-brand-600);
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+  .on-dark :focus-visible {
+    outline-color: var(--color-cyan-accent);
+  }
+  ::selection {
+    background: var(--color-brand-200);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+/* ── Reusable patterns ────────────────────────────────────────────────── */
+@layer components {
+  .container-x {
+    @apply mx-auto w-full max-w-[1280px] px-4 sm:px-6 lg:px-8;
+  }
+  .eyebrow {
+    @apply inline-flex items-center gap-2 text-[12px] font-bold tracking-[0.14em] text-brand-600 uppercase;
+  }
+  .eyebrow::before {
+    content: '';
+    @apply h-px w-6 bg-current opacity-60;
+  }
+  .card {
+    @apply rounded-[var(--radius-card)] border border-line bg-white shadow-[var(--shadow-card)];
+  }
+  .card-hover {
+    @apply transition duration-300 ease-out hover:-translate-y-1 hover:border-brand-200 hover:shadow-[var(--shadow-card-hover)] motion-reduce:hover:translate-y-0;
+  }
+  /* Gradient headline text */
+  .text-gradient {
+    background: linear-gradient(100deg, #6cc0f2 0%, #02c6dc 40%, #9fe9f5 80%);
+    background-size: 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    @apply animate-grad;
+  }
+  /* Same effect for light backgrounds (keeps AA contrast on white) */
+  .text-gradient-brand {
+    background: linear-gradient(100deg, #0d509f 0%, #0a7bc1 55%, #0891b2 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  /* Animated gradient border that appears on hover (wrap the card in .glow-border) */
+  .glow-border {
+    position: relative;
+    isolation: isolate;
+  }
+  .glow-border::before {
+    content: '';
+    position: absolute;
+    inset: -1px;
+    z-index: -1;
+    border-radius: calc(var(--radius-card) + 1px);
+    background: linear-gradient(120deg, #0c5dae, #02c6dc, #10a5e6, #0a7bc1, #0c5dae);
+    background-size: 300% 300%;
+    opacity: 0;
+    transition: opacity 0.35s ease;
+    animation: grad 6s ease infinite;
+  }
+  .glow-border:hover::before,
+  .glow-border:focus-within::before {
+    opacity: 1;
+  }
+  .grid-bg {
+    background-image:
+      linear-gradient(rgb(255 255 255 / 0.045) 1px, transparent 1px),
+      linear-gradient(90deg, rgb(255 255 255 / 0.045) 1px, transparent 1px);
+    background-size: 56px 56px;
+  }
+  .dot-bg {
+    background-image: radial-gradient(rgb(12 93 174 / 0.14) 1px, transparent 1px);
+    background-size: 22px 22px;
+  }
+  .aurora {
+    background:
+      radial-gradient(760px 440px at 85% 15%, rgb(10 123 193 / 0.28), transparent 70%),
+      radial-gradient(520px 320px at 10% 100%, rgb(2 198 220 / 0.1), transparent 70%),
+      linear-gradient(160deg, var(--background-hero) 0%, var(--background-dark) 55%, #0c2a55 120%);
+  }
+  .bg-media {
+    background:
+      radial-gradient(120% 90% at 50% 100%, rgb(12 93 174 / 0.1), transparent 60%),
+      linear-gradient(180deg, #f6f9fd, #e6f0fa);
+  }
+  .bg-media-teal {
+    background:
+      radial-gradient(120% 90% at 50% 100%, rgb(6 182 204 / 0.14), transparent 60%),
+      linear-gradient(180deg, #f2f9fc, #e1f2f8);
+  }
+  .bg-media-dark {
+    background:
+      radial-gradient(120% 90% at 50% 100%, rgb(16 165 230 / 0.35), transparent 60%),
+      linear-gradient(180deg, #0a2250, #061a3e);
+  }
+  .skeleton {
+    background: linear-gradient(90deg, #ebf2f9 25%, #f7fafd 37%, #ebf2f9 63%);
+    background-size: 200% 100%;
+    @apply animate-shimmer rounded-xl;
+  }
+  .prose-legal h2 {
+    @apply mt-10 mb-3 font-sans text-xl font-bold;
+  }
+  .prose-legal p,
+  .prose-legal li {
+    @apply leading-7 text-slate-600;
+  }
+  .prose-legal ul {
+    @apply my-3 list-disc space-y-1.5 pl-6;
+  }
+}
