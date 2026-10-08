@@ -1,37 +1,44 @@
 /**
- * SERVER-SIDE ENQUIRY ENDPOINT — POST /api/enquiry
+ * SERVER-SIDE ENQUIRY ENDPOINT — /api/enquiry
  * ---------------------------------------------------------------------------
- * Receives every enquiry form on the website (Request a Quote, Get a Quote,
- * headset quotes, corporate procurement, Contact Us, vendor registration) and
- * emails a notification to the business inbox through Resend's HTTP API.
+ * Receives all enquiry forms on the website (Request a Quote, Corporate procurement,
+ * Contact Us, Vendor registration, Headset quotes) and emails a notification to
+ * the business inbox.
  *
- * Runs as a Vercel Function (Web-standard Request/Response). All credentials
- * are SERVER environment variables — nothing here reaches the browser bundle.
+ * Fully self-contained Serverless Function compatible with:
+ * 1. Vercel Serverless Function (Node.js runtime via default export handler(req, res))
+ * 2. Web standard runtimes (Next.js / Cloudflare / Vite dev server via Request/Response)
  *
- *   RESEND_API_KEY           Required. Resend API key (server-side secret).
- *   ENQUIRY_TO_EMAIL         Optional. Defaults to zovainfotech@gmail.com.
- *   ENQUIRY_FROM_EMAIL       Optional. A sender on a domain verified in Resend,
- *                            e.g. "ZOVA INFOTECH Website <enquiries@zovainfotech.com>".
- *                            Defaults to Resend's test sender onboarding@resend.dev,
- *                            which Resend only delivers to the Resend account's own
- *                            address — so register the Resend account with
- *                            zovainfotech@gmail.com, or verify a domain.
- *   ENQUIRY_LOG_WEBHOOK_URL  Optional. Backup delivery log (e.g. the Google Sheets
- *   ENQUIRY_LOG_TOKEN        Apps Script in docs/enquiry-log.gs). Every submission is
- *                            recorded there with its email status, so nothing is lost
- *                            if email delivery fails.
- *   CRM_WEBHOOK_URL          Optional. Also POST each enquiry to a CRM / Zapier / Make hook,
- *   CRM_WEBHOOK_SECRET       signed with HMAC-SHA256 in the X-Zova-Signature header.
- *   ALLOWED_ORIGINS          Optional. Comma-separated origins allowed to submit.
- *
- * The endpoint reports success ONLY when the email provider has accepted the
- * message (or, when email is not configured, when the CRM webhook accepted it).
- * It never pretends a submission was delivered.
+ * Supported email providers:
+ * - Gmail SMTP (via Nodemailer)
+ * - Brevo (Sendinblue) REST API
+ * - Resend REST API
+ * - CRM / Webhooks (Zapier, Make, n8n, Google Sheets)
  */
 
-import { buildUserConfirmationEmail, sendEmail, type EmailMessage } from './mailer.ts'
+import nodemailer from 'nodemailer'
 
 export type Kind = 'quote' | 'corporate' | 'contact' | 'vendor' | 'headset'
+
+export interface EmailMessage {
+  from?: string
+  to: string | string[]
+  replyTo?: string
+  subject: string
+  html: string
+  text: string
+  tag?: string
+  idempotencyKey?: string
+}
+
+export interface SendEmailResult {
+  ok: boolean
+  id?: string
+  status?: number
+  error?: string
+  provider: 'smtp' | 'brevo' | 'resend' | 'dev-simulation'
+  previewNotice?: string
+}
 
 interface Payload {
   kind: Kind
@@ -118,65 +125,82 @@ export function isValidEmail(v: string) {
   return v.length <= 254 && EMAIL_RE.test(v)
 }
 
-/** Indian mobile (6–9 + 9 digits), optionally prefixed with +91 / 91 / 0. */
 export function normalisePhone(v: string): string | null {
   const d = v.replace(/[\s\-().]/g, '').replace(/^(\+91|0091|91|0)(?=[6-9]\d{9}$)/, '')
   return /^[6-9]\d{9}$/.test(d) ? `+91 ${d.slice(0, 5)} ${d.slice(5)}` : null
 }
 
+function reference(now = new Date()) {
+  const y = now.getFullYear()
+  const m = String(now.getMonth() + 1).padStart(2, '0')
+  const d = String(now.getDate()).padStart(2, '0')
+  const r = typeof crypto !== 'undefined' && 'getRandomValues' in crypto
+    ? Array.from(crypto.getRandomValues(new Uint8Array(3)))
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('')
+        .toUpperCase()
+    : Math.random().toString(16).slice(2, 8).toUpperCase()
+  return `ZV-${y}${m}${d}-${r}`
+}
+
+function esc(v: unknown): string {
+  return String(v ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function oneLine(v: string) {
+  return v.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim()
+}
+
+function str(v: unknown): string {
+  if (Array.isArray(v)) return v.join(', ')
+  return String(v ?? '').trim()
+}
+
 /** Strips control characters (keeps newlines/tabs) and trims. */
 function clean(v: unknown): unknown {
-  // eslint-disable-next-line no-control-regex -- intentionally stripping control characters
   if (typeof v === 'string') return v.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').trim()
   if (Array.isArray(v)) return v.slice(0, 50).map(clean)
   if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v as Record<string, unknown>).slice(0, 20).map(([k, x]) => [k, clean(x)]))
   return v
 }
 
-const esc = (v: unknown) =>
-  String(v ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
-
-function flatten(value: unknown): string {
-  if (Array.isArray(value)) {
-    return value
-      .map((v) =>
-        typeof v === 'object' && v
-          ? Object.entries(v)
-              .filter(([k, x]) => k !== 'key' && x !== '')
-              .map(([k, x]) => `${k}: ${x}`)
-              .join(', ')
-          : String(v),
-      )
-      .filter(Boolean)
-      .join('\n')
+function flatten(v: unknown): string {
+  if (Array.isArray(v)) {
+    if (v.every((item) => typeof item === 'object' && item !== null)) {
+      return v
+        .map((item, idx) => {
+          const lines = Object.entries(item)
+            .filter(([k]) => k !== 'key')
+            .map(([k, val]) => `${k}: ${val}`)
+            .join(', ')
+          return `#${idx + 1}: ${lines}`
+        })
+        .join('\n')
+    }
+    return v.join(', ')
   }
-  if (typeof value === 'boolean') return value ? 'Yes' : 'No'
-  return String(value ?? '')
+  return String(v ?? '').trim()
 }
 
-const str = (v: unknown) => (typeof v === 'string' ? v : Array.isArray(v) ? flatten(v) : v == null ? '' : String(v)).trim()
-const oneLine = (v: string, max = 90) => v.replace(/\s+/g, ' ').trim().slice(0, max)
-
-function reference() {
-  const d = new Date()
-  const ymd = `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')}`
-  return `ZV-${ymd}-${crypto.randomUUID().slice(0, 6).toUpperCase()}`
-}
-
-async function hmac(secret: string, body: string) {
-  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
-  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(body))
-  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, '0')).join('')
+async function hmac(secret: string, text: string) {
+  const enc = new TextEncoder()
+  const key = await crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+  const sig = await crypto.subtle.sign('HMAC', key, enc.encode(text))
+  return Array.from(new Uint8Array(sig))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
 }
 
 // ── Validation ─────────────────────────────────────────────────────────────
 
-export type Validated = { ok: true; kind: Kind; data: Record<string, unknown>; email: string; phone: string } | { ok: false; status: number; error: string }
+type Validated =
+  | { ok: true; kind: Kind; data: Record<string, unknown>; email: string; phone: string }
+  | { ok: false; status: number; error: string }
 
 export function validatePayload(payload: Payload): Validated {
   if (!payload || !KINDS.includes(payload.kind) || typeof payload.data !== 'object' || !payload.data || Array.isArray(payload.data)) {
@@ -204,7 +228,7 @@ export function validatePayload(payload: Payload): Validated {
   return { ok: true, kind: payload.kind, data, email, phone }
 }
 
-// ── Email content ──────────────────────────────────────────────────────────
+// ── Presentation & Templates ───────────────────────────────────────────────
 
 export interface Summary {
   name: string
@@ -220,33 +244,51 @@ export interface Summary {
   pageTitle: string
 }
 
-/** What was requested, per form. Used in the subject line and summary. */
 function requestedItem(kind: Kind, d: Record<string, unknown>): string {
-  switch (kind) {
-    case 'quote':
-      return [str(d.productModel), str(d.productId) && `(${str(d.productId)})`].filter(Boolean).join(' ') || str(d.requirementType)
-    case 'headset':
-      return str(d.product) || str(d.requirement)
-    case 'contact':
-      return str(d.service)
-    case 'corporate': {
-      const items = Array.isArray(d.items) ? (d.items as Record<string, unknown>[]).map((i) => str(i.category)).filter(Boolean) : []
-      return items.length ? `Corporate procurement: ${[...new Set(items)].join(', ')}` : 'Corporate procurement'
-    }
-    case 'vendor':
-      return `Vendor registration — ${str(d.company)}`
+  if (kind === 'quote') {
+    const model = str(d.productModel)
+    const id = str(d.productId)
+    if (model && id) return `${model} (${id})`
+    if (model) return model
+    return str(d.requirementType)
   }
+  if (kind === 'headset') {
+    const prod = str(d.product)
+    if (prod) return prod
+    const brand = str(d.brand)
+    const req = str(d.requirement)
+    return brand && req ? `${brand} — ${req}` : req || brand
+  }
+  if (kind === 'corporate') {
+    const items = Array.isArray(d.items) ? d.items : []
+    const cats = items.map((it) => (typeof it === 'object' && it && 'category' in it ? String((it as { category: unknown }).category) : '')).filter(Boolean)
+    const unique = Array.from(new Set(cats))
+    return unique.length ? `Corporate procurement: ${unique.join(', ')}` : 'Corporate procurement'
+  }
+  if (kind === 'contact') return str(d.service) || 'General enquiry'
+  if (kind === 'vendor') return `Vendor registration — ${str(d.company)}`
+  return ''
 }
 
 function totalQuantity(kind: Kind, d: Record<string, unknown>): string {
   if (kind === 'corporate' && Array.isArray(d.items)) {
-    const n = (d.items as Record<string, unknown>[]).reduce((s, i) => s + (Number(i.quantity) || 0), 0)
-    return n ? `${n} units (see items)` : ''
+    const total = d.items.reduce((sum, it) => {
+      const q = typeof it === 'object' && it && 'quantity' in it ? Number((it as { quantity: unknown }).quantity) : 0
+      return sum + (Number.isFinite(q) && q > 0 ? q : 0)
+    }, 0)
+    return total > 0 ? `${total} units across line items` : str(d.quantity)
   }
   return str(d.quantity)
 }
 
-export function summarise(kind: Kind, d: Record<string, unknown>, email: string, phone: string, meta: { pageUrl?: string; pageTitle?: string; page?: string }, now = new Date()): Summary {
+function summarise(
+  kind: Kind,
+  d: Record<string, unknown>,
+  email: string,
+  phone: string,
+  meta: { pageUrl?: string; pageTitle?: string; page?: string },
+  now = new Date(),
+): Summary {
   return {
     name: str(d.fullName ?? d.contactName),
     company: str(d.company),
@@ -318,33 +360,299 @@ export function buildEmail(kind: Kind, data: Record<string, unknown>, s: Summary
   return { html, text }
 }
 
-// ── Delivery ───────────────────────────────────────────────────────────────
+export function buildUserConfirmationEmail(
+  data: Record<string, unknown>,
+  summary: Summary,
+  ref: string,
+) {
+  const subject = `Quote Request Received — ${ref} | ${BRAND}`
 
-type SendResult = { ok: true; id: string } | { ok: false; status: number; error: string }
+  const detailsRows: [string, string][] = [
+    ['Reference ID', ref],
+    ['Requirement', summary.item],
+    ['Quantity', summary.quantity || '1 unit'],
+    ['Target budget', summary.budget || 'To be confirmed'],
+    ['Delivery city', str(data.city) ? `${str(data.city)}${str(data.pin) ? ` – ${str(data.pin)}` : ''}` : '—'],
+    ['Required by', str(data.requiredBy) || 'Standard timeline'],
+    ['Submitted on', summary.submittedAt],
+  ]
 
-async function sendWithResend(key: string, body: Record<string, unknown>, idempotencyKey: string): Promise<SendResult> {
+  if (summary.company) {
+    detailsRows.splice(1, 0, ['Company', summary.company])
+  }
+
+  if (summary.message) {
+    detailsRows.push(['Specifications / Notes', summary.message])
+  }
+
+  const td = 'padding:10px 14px;border-bottom:1px solid #eef2f7;vertical-align:top;font-size:14px'
+  const rowHtml = detailsRows
+    .map(
+      ([k, v]) =>
+        `<tr><td style="${td};color:#64748b;width:180px;font-weight:500">${esc(k)}</td><td style="${td};color:#0f172a;font-weight:600;white-space:pre-wrap">${esc(v)}</td></tr>`,
+    )
+    .join('')
+
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${esc(subject)}</title>
+</head>
+<body style="margin:0;padding:24px 12px;background:#f1f5f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1e293b">
+  <table role="presentation" width="100%" style="max-width:620px;margin:0 auto;background:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #e2e8f0;box-shadow:0 10px 25px -5px rgba(0,0,0,0.05)">
+    <tr>
+      <td style="background:linear-gradient(135deg, #080D1F 0%, #123b73 100%);padding:32px 28px;color:#ffffff">
+        <div style="font-size:12px;letter-spacing:2px;color:#23D5FF;font-weight:800;text-transform:uppercase">${BRAND}</div>
+        <h1 style="margin:10px 0 0 0;font-size:24px;font-weight:700;line-height:1.2;color:#ffffff">Quotation Request Received</h1>
+        <div style="margin-top:8px;display:inline-block;padding:4px 12px;background:rgba(35,213,255,0.15);border:1px solid rgba(35,213,255,0.3);border-radius:20px;font-size:13px;color:#23D5FF;font-family:monospace">Ref: ${esc(ref)}</div>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:28px">
+        <p style="margin:0 0 16px 0;font-size:15px;line-height:1.6;color:#334155">
+          Dear <strong>${esc(summary.name)}</strong>,
+        </p>
+        <p style="margin:0 0 20px 0;font-size:15px;line-height:1.6;color:#334155">
+          Thank you for reaching out to <strong>ZOVA INFOTECH</strong>. We have successfully received your quotation request for <strong>${esc(summary.item)}</strong>.
+        </p>
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;margin-bottom:24px">
+          <div style="background:#f1f5f9;padding:10px 16px;font-size:12px;font-weight:700;letter-spacing:0.5px;color:#475569;text-transform:uppercase">
+            Request Details
+          </div>
+          <table role="presentation" width="100%" style="border-collapse:collapse">
+            ${rowHtml}
+          </table>
+        </div>
+        <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:12px;padding:18px 20px;margin-bottom:24px">
+          <div style="font-size:14px;font-weight:700;color:#1e40af;margin-bottom:8px">What happens next?</div>
+          <ol style="margin:0;padding-left:20px;font-size:13px;line-height:1.6;color:#1e3a8a">
+            <li style="margin-bottom:6px"><strong>Requirement Analysis:</strong> Our enterprise procurement team verifies models, specifications, and warranty options.</li>
+            <li style="margin-bottom:6px"><strong>Partner Sourcing:</strong> We check pricing across our authorized distributor network to secure the best rates.</li>
+            <li><strong>Official Quotation:</strong> An itemised quotation with availability and delivery schedule will be dispatched to this email address.</li>
+          </ol>
+        </div>
+        <p style="margin:0 0 8px 0;font-size:14px;font-weight:600;color:#0f172a">Need immediate assistance or have urgent timelines?</p>
+        <p style="margin:0;font-size:13px;line-height:1.6;color:#64748b">
+          📞 Call / WhatsApp: <a href="tel:+917460854541" style="color:#2563eb;text-decoration:none;font-weight:600">+91 74608 54541</a><br>
+          ✉️ Email: <a href="mailto:Zovainfotech@gmail.com" style="color:#2563eb;text-decoration:none;font-weight:600">Zovainfotech@gmail.com</a>
+        </p>
+      </td>
+    </tr>
+    <tr>
+      <td style="background:#f8fafc;padding:20px 28px;border-top:1px solid #e2e8f0;text-align:center;font-size:12px;color:#94a3b8;line-height:1.5">
+        <strong>${BRAND} Pvt. Ltd.</strong> · Complete IT Solutions &amp; Procurement Partner<br>
+        D Block, Sector 22, Noida, Uttar Pradesh – 201301, India
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`
+
+  const text = [
+    `Quotation Request Received — ${BRAND}`,
+    `Reference: ${ref}`,
+    '',
+    `Dear ${summary.name},`,
+    '',
+    `Thank you for reaching out to ZOVA INFOTECH. We have safely received your quotation request for: ${summary.item}.`,
+    '',
+    'REQUEST SUMMARY:',
+    ...detailsRows.map(([k, v]) => `• ${k}: ${v}`),
+    '',
+    'WHAT HAPPENS NEXT:',
+    '1. Our enterprise procurement specialists analyze your specifications.',
+    '2. We source options across our authorized partner network.',
+    '3. An itemised quotation will be emailed to you shortly.',
+    '',
+    'NEED IMMEDIATE HELP?',
+    'Phone / WhatsApp: +91 74608 54541',
+    'Email: Zovainfotech@gmail.com',
+    '',
+    `${BRAND} Pvt. Ltd. · D Block, Sector 22, Noida, Uttar Pradesh – 201301`,
+  ].join('\n')
+
+  return { subject, html, text }
+}
+
+// ── Email Providers ────────────────────────────────────────────────────────
+
+async function sendWithSmtp(msg: EmailMessage): Promise<SendEmailResult> {
+  const host = env('SMTP_HOST')
+  const user = env('SMTP_USER') || env('GMAIL_USER')
+  const pass = (env('SMTP_PASS') || env('GMAIL_APP_PASSWORD'))?.replace(/\s+/g, '')
+
+  if (!user || !pass) {
+    return { ok: false, provider: 'smtp', error: 'SMTP credentials missing' }
+  }
+
+  const isGmail = !host || host === 'smtp.gmail.com' || Boolean(env('GMAIL_USER'))
+  const port = Number(env('SMTP_PORT') || (env('SMTP_SECURE') === 'true' ? 465 : (isGmail ? 465 : 587)))
+  const secure = env('SMTP_SECURE') === 'true' || port === 465
+
+  const isResendPlaceholder = msg.from?.includes('onboarding@resend.dev')
+  const defaultFrom = `"ZOVA INFOTECH" <${user}>`
+  const from = (!isResendPlaceholder && msg.from) || env('SMTP_FROM') || env('ENQUIRY_FROM_EMAIL') || defaultFrom
+
+  try {
+    const transportConfig = isGmail && !env('SMTP_HOST')
+      ? {
+          service: 'gmail',
+          auth: { user, pass },
+          connectionTimeout: 10000,
+          greetingTimeout: 10000,
+          socketTimeout: 15000,
+        }
+      : {
+          host: host || 'smtp.gmail.com',
+          port,
+          secure,
+          auth: { user, pass },
+          tls: {
+            rejectUnauthorized: false,
+          },
+          connectionTimeout: 10000,
+          greetingTimeout: 10000,
+          socketTimeout: 15000,
+        }
+
+    const transporter = nodemailer.createTransport(transportConfig)
+
+    const info = await transporter.sendMail({
+      from,
+      to: Array.isArray(msg.to) ? msg.to.join(', ') : msg.to,
+      replyTo: msg.replyTo,
+      subject: msg.subject,
+      html: msg.html,
+      text: msg.text,
+    })
+
+    return {
+      ok: true,
+      provider: 'smtp',
+      id: info.messageId,
+    }
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : String(err)
+    return {
+      ok: false,
+      provider: 'smtp',
+      error: errorMsg,
+    }
+  }
+}
+
+async function sendWithBrevo(key: string, msg: EmailMessage): Promise<SendEmailResult> {
+  const fromEmail = env('BREVO_FROM_EMAIL') || env('ENQUIRY_FROM_EMAIL') || 'zovainfotech@gmail.com'
+  const toList = (Array.isArray(msg.to) ? msg.to : [msg.to]).map((email) => ({ email: email.trim() }))
+
+  try {
+    const res = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: {
+        'api-key': key,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        sender: { name: BRAND, email: fromEmail },
+        to: toList,
+        replyTo: msg.replyTo ? { email: msg.replyTo } : undefined,
+        subject: msg.subject,
+        htmlContent: msg.html,
+        textContent: msg.text,
+        tags: msg.tag ? [msg.tag] : undefined,
+      }),
+      signal: AbortSignal.timeout(10000),
+    })
+
+    const data = (await res.json().catch(() => ({}))) as { messageId?: string; message?: string }
+    if (res.ok && data.messageId) {
+      return { ok: true, provider: 'brevo', id: data.messageId }
+    }
+    return { ok: false, provider: 'brevo', status: res.status, error: data.message || `HTTP ${res.status}` }
+  } catch (err) {
+    return { ok: false, provider: 'brevo', error: err instanceof Error ? err.message : 'Brevo network error' }
+  }
+}
+
+async function sendWithResend(key: string, msg: EmailMessage): Promise<SendEmailResult> {
   const base = env('RESEND_API_BASE') ?? 'https://api.resend.com'
-  let last: SendResult = { ok: false, status: 0, error: 'not attempted' }
+  const from = msg.from || env('ENQUIRY_FROM_EMAIL') || DEFAULT_FROM
+  const to = Array.isArray(msg.to) ? msg.to : [msg.to]
+
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const res = await fetch(`${base}/emails`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
-        body: JSON.stringify(body),
+        headers: {
+          Authorization: `Bearer ${key}`,
+          'Content-Type': 'application/json',
+          ...(msg.idempotencyKey ? { 'Idempotency-Key': msg.idempotencyKey } : {}),
+        },
+        body: JSON.stringify({
+          from,
+          to,
+          reply_to: msg.replyTo,
+          subject: msg.subject,
+          html: msg.html,
+          text: msg.text,
+          tags: msg.tag ? [{ name: 'form', value: msg.tag }] : undefined,
+        }),
         signal: AbortSignal.timeout(10000),
       })
       const json = (await res.json().catch(() => ({}))) as { id?: string; message?: string; name?: string }
-      if (res.ok && json.id) return { ok: true, id: json.id }
-      last = { ok: false, status: res.status, error: json.message ?? json.name ?? `HTTP ${res.status}` }
-      // Retry only transient failures; the idempotency key prevents a double send.
-      if (res.status !== 429 && res.status < 500) break
+      if (res.ok && json.id) return { ok: true, provider: 'resend', id: json.id }
+      if (res.status !== 429 && res.status < 500) {
+        return { ok: false, provider: 'resend', status: res.status, error: json.message ?? json.name ?? `HTTP ${res.status}` }
+      }
     } catch (e) {
-      last = { ok: false, status: 0, error: e instanceof Error ? e.message : 'network error' }
+      if (attempt === 1) {
+        return { ok: false, provider: 'resend', error: e instanceof Error ? e.message : 'network error' }
+      }
     }
     await new Promise((r) => setTimeout(r, 600))
   }
-  return last
+  return { ok: false, provider: 'resend', error: 'Resend delivery failed' }
 }
+
+export async function sendEmail(msg: EmailMessage): Promise<SendEmailResult> {
+  const isSmtp = Boolean(env('SMTP_USER') || env('GMAIL_USER'))
+  const isBrevo = Boolean(env('BREVO_API_KEY'))
+  const isResend = Boolean(env('RESEND_API_KEY'))
+
+  if (isSmtp) {
+    return sendWithSmtp(msg)
+  }
+
+  if (isBrevo) {
+    return sendWithBrevo(env('BREVO_API_KEY')!, msg)
+  }
+
+  if (isResend) {
+    return sendWithResend(env('RESEND_API_KEY')!, msg)
+  }
+
+  const isDev = (env('NODE_ENV') === 'development' || env('DEV_MAILER') === 'true') && !env('RESEND_API_BASE')
+  if (isDev) {
+    const toStr = Array.isArray(msg.to) ? msg.to.join(', ') : msg.to
+    console.info(`\n📧 [DEV MAILER SIMULATION] Email to: ${toStr}`)
+    console.info(`   Subject: ${msg.subject}`)
+    return {
+      ok: true,
+      provider: 'dev-simulation',
+      id: `dev-${Date.now()}`,
+    }
+  }
+
+  return {
+    ok: false,
+    provider: 'dev-simulation',
+    error: 'No email provider configured. Please set GMAIL_USER/GMAIL_APP_PASSWORD, BREVO_API_KEY, or RESEND_API_KEY.',
+  }
+}
+
+// ── Main Enquiry Handlers ──────────────────────────────────────────────────
 
 async function postJson(url: string, body: string, headers: Record<string, string> = {}) {
   try {
@@ -355,7 +663,7 @@ async function postJson(url: string, body: string, headers: Record<string, strin
   }
 }
 
-// In-memory protections (per warm instance). For strict limits across instances use a shared store such as Upstash Redis.
+// In-memory protections (per warm instance)
 const hits = new Map<string, { n: number; t: number }>()
 function rateLimited(ip: string) {
   const now = Date.now()
@@ -417,10 +725,20 @@ export async function handleEnquiry(request: Request): Promise<Response> {
   if (request.method === 'OPTIONS') {
     return new Response(null, {
       status: 204,
-      headers: corsOrigin ? { 'Access-Control-Allow-Origin': corsOrigin, 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type' } : {},
+      headers: corsOrigin
+        ? {
+            'Access-Control-Allow-Origin': corsOrigin,
+            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type',
+          }
+        : {},
     })
   }
-  if (request.method === 'GET') return health(corsOrigin)
+
+  if (request.method === 'GET') {
+    return health(corsOrigin)
+  }
+
   if (request.method !== 'POST') return json(405, { ok: false, error: 'Method not allowed' }, corsOrigin)
   if (allowed.length && origin && !allowed.includes(origin)) return json(403, { ok: false, error: 'Origin not allowed' })
   if (!(request.headers.get('content-type') ?? '').includes('application/json')) return json(415, { ok: false, error: 'Unsupported content type.' }, corsOrigin)
@@ -498,8 +816,7 @@ export async function handleEnquiry(request: Request): Promise<Response> {
       // In Resend mock test suite, use sendWithResend directly
       sent = await sendWithResend(
         resendKey,
-        { from, to, reply_to: v.email, subject, html, text, tags: [{ name: 'form', value: v.kind }] },
-        `zova-enquiry-${submissionId ?? ref}`,
+        adminMsg,
       )
     } else {
       sent = await sendEmail(adminMsg)
@@ -538,7 +855,6 @@ export async function handleEnquiry(request: Request): Promise<Response> {
 
   const record = { reference: ref, kind: v.kind, subject, emailStatus, emailId, emailError, submittedAt: new Date().toISOString(), summary, data: v.data }
 
-  // Backup log and CRM run regardless of the email result, so an enquiry can be recovered if email fails.
   const [logged, crmOk] = await Promise.all([
     logUrl ? postJson(logUrl, JSON.stringify({ token: env('ENQUIRY_LOG_TOKEN') ?? '', ...record })) : Promise.resolve(false),
     crm
@@ -552,7 +868,6 @@ export async function handleEnquiry(request: Request): Promise<Response> {
 
   const delivered = emailStatus === 'sent' || (emailStatus === 'not-configured' && crmOk)
   if (!delivered) {
-    // Full record in the function log so the enquiry is recoverable even without the backup log.
     console.error('[enquiry] delivery failed', JSON.stringify({ ...record, logged }))
     return json(502, { ok: false, error: FAIL_MSG, reference: ref }, corsOrigin)
   }
@@ -569,10 +884,12 @@ export async function handleEnquiry(request: Request): Promise<Response> {
   )
 }
 
-// Universal Serverless Function Handler
-// Compatible with both:
-// 1. Node.js runtime (Vercel Serverless Functions on `@vercel/node` passing `(req, res)`)
-// 2. Web Standard runtime (passing `Request`)
+/**
+ * Universal Serverless Function Handler
+ * Compatible with both:
+ * 1. Node.js runtime (Vercel Serverless Functions on `@vercel/node` passing `(req, res)`)
+ * 2. Web Standard runtime (passing `Request`)
+ */
 export default async function handler(req: any, res?: any) {
   // If called by Node runtime (Vercel Serverless Function passing req and res)
   if (res && (typeof res.status === 'function' || typeof res.statusCode === 'number')) {
@@ -665,4 +982,3 @@ export function POST(request: Request) {
 export function OPTIONS(request: Request) {
   return handleEnquiry(request)
 }
-
