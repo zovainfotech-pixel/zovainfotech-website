@@ -25,7 +25,7 @@ const mock = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ id: `mock-${sent.length}` }))
   })
 })
-await new Promise((r) => mock.listen(0, r))
+await new Promise((r) => mock.listen(0, '127.0.0.1', r))
 const base = `http://127.0.0.1:${mock.address().port}`
 
 const { handleEnquiry, DEFAULT_TO, normalisePhone } = await import('../api/enquiry.ts')

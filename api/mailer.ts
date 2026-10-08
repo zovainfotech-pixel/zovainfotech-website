@@ -202,9 +202,7 @@ export function buildUserConfirmationEmail(
  * Sends an email using Nodemailer (Gmail SMTP or custom SMTP).
  */
 async function sendWithSmtp(msg: EmailMessage): Promise<SendEmailResult> {
-  const host = env('SMTP_HOST') || 'smtp.gmail.com'
-  const port = Number(env('SMTP_PORT') || (env('SMTP_SECURE') === 'true' ? 465 : 587))
-  const secure = env('SMTP_SECURE') === 'true' || port === 465
+  const host = env('SMTP_HOST')
   const user = env('SMTP_USER') || env('GMAIL_USER')
   const pass = (env('SMTP_PASS') || env('GMAIL_APP_PASSWORD'))?.replace(/\s+/g, '')
 
@@ -212,18 +210,38 @@ async function sendWithSmtp(msg: EmailMessage): Promise<SendEmailResult> {
     return { ok: false, provider: 'smtp', error: 'SMTP credentials missing' }
   }
 
-  const from = msg.from || env('SMTP_FROM') || env('ENQUIRY_FROM_EMAIL') || `"ZOVA INFOTECH" <${user}>`
+  const isGmail = !host || host === 'smtp.gmail.com' || Boolean(env('GMAIL_USER'))
+  const port = Number(env('SMTP_PORT') || (env('SMTP_SECURE') === 'true' ? 465 : (isGmail ? 465 : 587)))
+  const secure = env('SMTP_SECURE') === 'true' || port === 465
+
+  // When sending via Gmail/SMTP, sender must never be the Resend sandbox domain (onboarding@resend.dev)
+  const isResendPlaceholder = msg.from?.includes('onboarding@resend.dev')
+  const defaultFrom = `"ZOVA INFOTECH" <${user}>`
+  const from = (!isResendPlaceholder && msg.from) || env('SMTP_FROM') || env('ENQUIRY_FROM_EMAIL') || defaultFrom
 
   try {
-    const transporter = nodemailer.createTransport({
-      host,
-      port,
-      secure,
-      auth: { user, pass },
-      tls: {
-        rejectUnauthorized: false,
-      },
-    })
+    const transportConfig = isGmail && !env('SMTP_HOST')
+      ? {
+          service: 'gmail',
+          auth: { user, pass },
+          connectionTimeout: 10000,
+          greetingTimeout: 10000,
+          socketTimeout: 15000,
+        }
+      : {
+          host: host || 'smtp.gmail.com',
+          port,
+          secure,
+          auth: { user, pass },
+          tls: {
+            rejectUnauthorized: false,
+          },
+          connectionTimeout: 10000,
+          greetingTimeout: 10000,
+          socketTimeout: 15000,
+        }
+
+    const transporter = nodemailer.createTransport(transportConfig)
 
     const info = await transporter.sendMail({
       from,
